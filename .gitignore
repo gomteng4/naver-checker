@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+read_app.py
+debug_mobile.py
+debug_mobile2.py
+check_syntax.py
+test_debug.py
+git_push.py
+create_repo.py
+make_shortcut.py
+copy_html.py
+*.bat
+templates/
