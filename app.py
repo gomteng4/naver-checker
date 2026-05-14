@@ -273,32 +273,38 @@ def check_visitor_sync(blog_id):
         return {"today": None, "error": str(e)[:100]}
 
 # ── Job ───────────────────────────────────────────────────
-def run_job(job_id, posts, blog_id, kw_n):
+def run_job(job_id, posts, blog_id, kw_n, mode="all"):
     q = jobs[job_id]
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=[
                 "--no-sandbox","--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled"])
-            pc_ctx = browser.new_context(
-                viewport={"width":1920,"height":1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                locale="ko-KR", extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
-            )
-            pc_ctx.add_init_script(STEALTH_JS)
-            mobile_ctx = browser.new_context(
-                viewport={"width":390,"height":844},
-                user_agent="Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
-                is_mobile=True, has_touch=True, locale="ko-KR",
-                extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
-            )
-            mobile_ctx.add_init_script(STEALTH_JS)
+            pc_ctx = mobile_ctx = None
+            if mode in ("exposure", "all"):
+                pc_ctx = browser.new_context(
+                    viewport={"width":1920,"height":1080},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    locale="ko-KR", extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
+                )
+                pc_ctx.add_init_script(STEALTH_JS)
+                mobile_ctx = browser.new_context(
+                    viewport={"width":390,"height":844},
+                    user_agent="Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+                    is_mobile=True, has_touch=True, locale="ko-KR",
+                    extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
+                )
+                mobile_ctx.add_init_script(STEALTH_JS)
 
             for i, post in enumerate(posts):
                 title = post["title"]
                 keyword = "".join(title.split()[:kw_n])
-                sr = crawl_keyword(keyword, title, pc_ctx, mobile_ctx, [blog_id])
-                indexed = check_blog_index_sync(blog_id, title, browser)
+                sr = {"pc": [], "mobile": [], "error": None, "keyword": keyword}
+                indexed = None
+                if mode in ("exposure", "all") and pc_ctx and mobile_ctx:
+                    sr = crawl_keyword(keyword, title, pc_ctx, mobile_ctx, [blog_id])
+                if mode in ("index", "all"):
+                    indexed = check_blog_index_sync(blog_id, title, browser)
                 q.put(("result", {
                     "idx": i,
                     "logNo": post.get("logNo",""),
@@ -310,6 +316,7 @@ def run_job(job_id, posts, blog_id, kw_n):
                     "mobile": sr["mobile"],
                     "blog_index": indexed,
                     "error": sr.get("error"),
+                    "mode": mode,
                 }))
                 time.sleep(1.2)
             browser.close()
@@ -342,11 +349,14 @@ def start_check():
     blog_id = (data.get("blogId") or "").strip().lower()
     posts = data.get("posts", [])
     kw_n = max(1, min(5, int(data.get("kwN", 2))))
+    mode = data.get("mode", "all")
+    if mode not in ("all", "index", "exposure"):
+        mode = "all"
     if not blog_id: return jsonify({"error":"blogId 필요"}), 400
     if not posts: return jsonify({"error":"게시물 없음 — RSS 동기화 먼저"}), 400
     job_id = str(uuid.uuid4())
     jobs[job_id] = queue.Queue()
-    threading.Thread(target=run_job, args=(job_id, posts, blog_id, kw_n), daemon=True).start()
+    threading.Thread(target=run_job, args=(job_id, posts, blog_id, kw_n, mode), daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(posts)})
 
 @app.route("/stream/<job_id>")
@@ -542,8 +552,9 @@ tbody tr.checking td{background:#fffdf5}
 <script>
 // ── localStorage 저장 (계정/게시물 모두 브라우저에 보관) ──
 const LS_KEY = 'naver_dash_v2';
-let accounts = [], activeId = null, kwN = 2, curEs = null;
+let accounts = [], activeId = null, kwN = 2;
 const vCache = new Map();
+const checkState = {}; // id -> {es, done, total, mode} — 계정 전환 후에도 유지
 
 function lsLoad(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||'[]'); }catch{ return []; } }
 function lsSave(){ localStorage.setItem(LS_KEY, JSON.stringify(accounts)); }
@@ -586,11 +597,15 @@ function renderSidebar(){
   if(!accounts.length){el.innerHTML='<div style="padding:14px;font-size:12px;color:var(--mu);text-align:center">등록된 계정이 없습니다</div>';return;}
   el.innerHTML=accounts.map(a=>{
     const v=vCache.get(a.id);
-    const vHtml=v!==undefined?`<div class="acct-v">${v.toLocaleString('ko-KR')}명 방문</div>`:`<div class="acct-v none">방문자 미확인</div>`;
+    const cs=checkState[a.id];
+    let statusHtml;
+    if(cs) statusHtml=`<div class="acct-v" style="color:#e65100"><span class="spin"></span> 확인 중 ${cs.done}/${cs.total}</div>`;
+    else if(v!==undefined) statusHtml=`<div class="acct-v">${v.toLocaleString('ko-KR')}명 방문</div>`;
+    else statusHtml=`<div class="acct-v none">방문자 미확인</div>`;
     return `<div class="acct-item${a.id===activeId?' active':''}" onclick="selectAccount('${a.id}')">
       <div class="acct-name">${esc(a.displayName)}</div>
       <div class="acct-id">${esc(a.blogId)}</div>
-      ${vHtml}
+      ${statusHtml}
     </div>`;
   }).join('');
 }
@@ -610,6 +625,7 @@ function addAccount(){
 
 function deleteAccount(id,name){
   if(!confirm('"'+name+'" 계정을 삭제할까요?'))return;
+  if(checkState[id]){checkState[id].es.close();delete checkState[id];}
   accounts=accounts.filter(a=>a.id!==id);
   lsSave();
   if(activeId===id){
@@ -630,6 +646,11 @@ function renderDetail(account){
   const v=vCache.get(account.id);
   const vHtml=v!==undefined?`<div class="v-chip">오늘 방문자: ${v.toLocaleString('ko-KR')}명</div>`:`<div class="v-chip dim">방문자 미확인</div>`;
   const lastSync=account.lastSync?'동기화: '+account.lastSync.slice(0,16).replace('T',' '):'미동기화';
+  const cs=checkState[account.id];
+  const running=!!cs;
+  const cmode=cs?cs.mode:'all';
+  const pct=cs&&cs.total?Math.round(cs.done/cs.total*100):0;
+  const hasPosts=!!posts.length;
   document.getElementById('main-panel').innerHTML=`
     <div class="detail-head">
       <div>
@@ -648,30 +669,55 @@ function renderDetail(account){
         ${[1,2,3,4,5].map(n=>`<button onclick="setKwN(${n},this)"${n===kwN?' class="sel"':''}>${n}</button>`).join('')}
       </div>
       <div class="ctrl-sep"></div>
-      <button class="btn-sync" id="btn-sync" onclick="syncPosts('${account.id}','${account.blogId}')">RSS 동기화</button>
+      <button class="btn-sync" id="btn-sync" onclick="syncPosts('${account.id}','${account.blogId}')"${running?' disabled':''}>RSS 동기화</button>
       <div class="spacer"></div>
       <span class="sync-meta" id="sync-meta">${lastSync} · ${posts.length}개</span>
-      <button class="btn-check" id="btn-check" onclick="startCheck('${account.id}','${account.blogId}')"${!posts.length?' disabled':''}>전체 확인</button>
+      <button class="btn-sync" id="btn-idx" onclick="startCheck('${account.id}','${account.blogId}','index')"${!hasPosts||running?' disabled':''}>색인 확인</button>
+      <button class="btn-sync" id="btn-exp" onclick="startCheck('${account.id}','${account.blogId}','exposure')"${!hasPosts||running?' disabled':''}>노출 확인</button>
+      <button class="btn-check" id="btn-check" onclick="startCheck('${account.id}','${account.blogId}','all')"${!hasPosts||running?' disabled':''}>전체 확인</button>
     </div>
-    <div class="prog-wrap" id="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
-    <div class="prog-txt" id="prog-txt"></div>
+    <div class="prog-wrap" id="prog-wrap" style="${running?'':'display:none'}"><div class="prog-bar" id="prog-bar" style="width:${pct}%"></div></div>
+    <div class="prog-txt" id="prog-txt" style="${running?'':'display:none'}">${running?cs.done+' / '+cs.total+' 완료':''}</div>
     <div class="tbl-wrap">
-      ${posts.length?renderTable(posts):'<div style="padding:24px;text-align:center;color:var(--mu);font-size:13px">RSS 동기화를 눌러 게시물을 불러오세요</div>'}
+      ${hasPosts?renderTable(posts,running,cmode):'<div style="padding:24px;text-align:center;color:var(--mu);font-size:13px">RSS 동기화를 눌러 게시물을 불러오세요</div>'}
     </div>`;
 }
 
-function renderTable(posts){
-  const rows=posts.map((p,i)=>`<tr id="row-${i}">
-    <td style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
-    <td class="post-title" style="max-width:280px">
-      ${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`:esc(p.title)}
-      <div class="post-kw" id="kw-${i}">키워드: —</div>
-    </td>
-    <td class="post-date">${fmtDate(p.pubDate)}</td>
-    <td id="idx-${i}"><span class="tag-dim">—</span></td>
-    <td id="pc-${i}"><span class="tag-dim">—</span></td>
-    <td id="mob-${i}"><span class="tag-dim">—</span></td>
-  </tr>`).join('');
+function renderTable(posts,running,mode){
+  const rows=posts.map((p,i)=>{
+    const hasIdx=p.blogIndex!==undefined;
+    const hasExp=p.pc!==undefined;
+    let idxHtml,pcHtml,mobHtml;
+    if(hasIdx){
+      idxHtml=p.blogIndex===true?'<span class="idx-y">✓ 색인됨</span>':p.blogIndex===false?'<span class="idx-n">✗ 미색인</span>':'<span class="tag-dim">—</span>';
+    }else if(running&&mode!=='exposure'){
+      idxHtml='<span class="spin"></span>';
+    }else{
+      idxHtml='<span class="tag-dim">—</span>';
+    }
+    if(hasExp){
+      pcHtml=p.pc&&p.pc.length?'<div class="tags">'+p.pc.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
+      mobHtml=p.mobile&&p.mobile.length?'<div class="tags">'+p.mobile.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
+    }else if(running&&mode!=='index'){
+      pcHtml=mobHtml='<span class="spin"></span>';
+    }else{
+      pcHtml=mobHtml='<span class="tag-dim">—</span>';
+    }
+    const kwText=p.keyword?'키워드: '+p.keyword:'키워드: —';
+    const pendingIdx=running&&!hasIdx&&mode!=='exposure';
+    const pendingExp=running&&!hasExp&&mode!=='index';
+    return `<tr id="row-${i}"${pendingIdx||pendingExp?' class="checking"':''}>
+      <td style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
+      <td class="post-title" style="max-width:280px">
+        ${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`:esc(p.title)}
+        <div class="post-kw" id="kw-${i}">${esc(kwText)}</div>
+      </td>
+      <td class="post-date">${fmtDate(p.pubDate)}</td>
+      <td id="idx-${i}">${idxHtml}</td>
+      <td id="pc-${i}">${pcHtml}</td>
+      <td id="mob-${i}">${mobHtml}</td>
+    </tr>`;
+  }).join('');
   return `<table><thead><tr>
     <th>#</th><th>제목 / 키워드</th><th>발행일</th>
     <th>블로그 색인</th><th>🖥 PC 노출</th><th>📱 모바일 노출</th>
@@ -719,70 +765,82 @@ async function checkAllVisitors(){
   toast('전체 방문자 확인 완료');
 }
 
-async function startCheck(id,blogId){
-  if(curEs){curEs.close();curEs=null;}
-  const btn=document.getElementById('btn-check');
-  const syncBtn=document.getElementById('btn-sync');
-  const progWrap=document.getElementById('prog-wrap');
-  const progBar=document.getElementById('prog-bar');
-  const progTxt=document.getElementById('prog-txt');
-  if(btn)btn.disabled=true;
-  if(syncBtn)syncBtn.disabled=true;
-  if(progWrap)progWrap.style.display='block';
-  if(progTxt)progTxt.style.display='block';
-
+async function startCheck(id,blogId,mode){
+  mode=mode||'all';
+  if(checkState[id]){checkState[id].es.close();delete checkState[id];}
   const account=accounts.find(a=>a.id===id);
-  const posts=account?account.posts||[]:[];
-  posts.forEach((p,i)=>{
-    const row=document.getElementById('row-'+i);if(row)row.className='checking';
-    const kwEl=document.getElementById('kw-'+i);
-    if(kwEl)kwEl.textContent='키워드: '+"".concat(...p.title.split(/\s+/).slice(0,kwN));
-    const s='<span class="spin"></span>';
-    ['idx-','pc-','mob-'].forEach(pfx=>{const el=document.getElementById(pfx+i);if(el)el.innerHTML=s;});
+  if(!account||!account.posts.length){toast('RSS 동기화 먼저 해주세요');return;}
+  // 관련 필드만 초기화
+  account.posts.forEach(p=>{
+    if(mode!=='exposure'){delete p.blogIndex;}
+    if(mode!=='index'){delete p.pc;delete p.mobile;delete p.keyword;}
+    delete p.error;
   });
-
-  const r=await apiFetch('/api/check',{method:'POST',body:JSON.stringify({blogId,posts,kwN})});
-  if(r.error){toast('오류: '+r.error);if(btn)btn.disabled=false;if(syncBtn)syncBtn.disabled=false;return;}
-
-  const total=r.total; let done=0;
-  if(progBar)progBar.style.width='0%';
-  if(progTxt)progTxt.textContent='0 / '+total+' 완료';
-
+  lsSave();
+  if(activeId===id)renderDetail(account);
+  renderSidebar();
+  const posts=account.posts;
+  const r=await apiFetch('/api/check',{method:'POST',body:JSON.stringify({blogId,posts,kwN,mode})});
+  if(r.error){
+    toast('오류: '+r.error);
+    if(activeId===id)renderDetail(accounts.find(a=>a.id===id));
+    renderSidebar();return;
+  }
+  const total=r.total;
+  checkState[id]={done:0,total,mode,es:null};
+  if(activeId===id){
+    const pw=document.getElementById('prog-wrap');const pt=document.getElementById('prog-txt');const pb=document.getElementById('prog-bar');
+    if(pw)pw.style.display='block';if(pt){pt.style.display='block';pt.textContent='0 / '+total+' 완료';}if(pb)pb.style.width='0%';
+  }
+  renderSidebar();
   const es=new EventSource('/stream/'+r.job_id);
-  curEs=es;
+  checkState[id].es=es;
   es.onmessage=ev=>{
     if(ev.data==='[DONE]'||ev.data==='[TIMEOUT]'){
-      es.close();curEs=null;
-      if(btn)btn.disabled=false;if(syncBtn)syncBtn.disabled=false;
-      if(progTxt)progTxt.textContent='✓ '+done+'/'+total+' 완료';
-      return;
+      es.close();
+      const cs=checkState[id];const doneN=cs?cs.done:total;
+      delete checkState[id];
+      if(activeId===id){
+        ['btn-check','btn-idx','btn-exp','btn-sync'].forEach(bid=>{const b=document.getElementById(bid);if(b)b.disabled=false;});
+        const pt=document.getElementById('prog-txt');if(pt)pt.textContent='✓ '+doneN+'/'+total+' 완료';
+      }
+      renderSidebar();return;
     }
     const res=JSON.parse(ev.data);
-    const i=res.idx; done++;
-    const pct=total?Math.round(done/total*100):0;
-    if(progBar)progBar.style.width=pct+'%';
-    if(progTxt)progTxt.textContent=done+' / '+total+' 완료';
+    const i=res.idx;
+    if(checkState[id])checkState[id].done++;
+    // 결과를 계정 데이터에 저장 (계정 전환 후 돌아와도 보임)
+    const acct=accounts.find(a=>a.id===id);
+    if(acct&&acct.posts[i]){
+      if(mode!=='index'){acct.posts[i].pc=res.pc;acct.posts[i].mobile=res.mobile;acct.posts[i].keyword=res.keyword;}
+      if(mode!=='exposure'){acct.posts[i].blogIndex=res.blog_index;}
+      if(res.error)acct.posts[i].error=res.error;
+      lsSave();
+    }
+    renderSidebar();
+    if(activeId!==id)return; // 다른 계정 보는 중이면 DOM 업데이트 생략
+    const cs=checkState[id];const doneN=cs?cs.done:0;
+    const pct=total?Math.round(doneN/total*100):0;
+    const pb=document.getElementById('prog-bar');if(pb)pb.style.width=pct+'%';
+    const pt=document.getElementById('prog-txt');if(pt)pt.textContent=doneN+' / '+total+' 완료';
     const row=document.getElementById('row-'+i);if(row)row.className='';
-    const kwEl=document.getElementById('kw-'+i);if(kwEl)kwEl.textContent='키워드: '+(res.keyword||'');
-    const idxEl=document.getElementById('idx-'+i);
-    if(idxEl){
-      if(res.blog_index===true)idxEl.innerHTML='<span class="idx-y">✓ 색인됨</span>';
-      else if(res.blog_index===false)idxEl.innerHTML='<span class="idx-n">✗ 미색인</span>';
-      else idxEl.innerHTML='—';
+    if(mode!=='index'){const kwEl=document.getElementById('kw-'+i);if(kwEl)kwEl.textContent='키워드: '+(res.keyword||'');}
+    if(mode!=='exposure'){
+      const idxEl=document.getElementById('idx-'+i);
+      if(idxEl)idxEl.innerHTML=res.blog_index===true?'<span class="idx-y">✓ 색인됨</span>':res.blog_index===false?'<span class="idx-n">✗ 미색인</span>':'<span class="tag-dim">—</span>';
     }
-    const pcEl=document.getElementById('pc-'+i);
-    if(pcEl){
-      if(res.error&&!(res.pc&&res.pc.length))pcEl.innerHTML='<span style="color:#e53935;font-size:11px">오류</span>';
-      else if(res.pc&&res.pc.length)pcEl.innerHTML='<div class="tags">'+res.pc.map(mkTag).join('')+'</div>';
-      else pcEl.innerHTML='<span class="tag-no">✗ 미노출</span>';
-    }
-    const mobEl=document.getElementById('mob-'+i);
-    if(mobEl){
-      if(res.mobile&&res.mobile.length)mobEl.innerHTML='<div class="tags">'+res.mobile.map(mkTag).join('')+'</div>';
-      else mobEl.innerHTML='<span class="tag-no">✗ 미노출</span>';
+    if(mode!=='index'){
+      const pcEl=document.getElementById('pc-'+i);
+      if(pcEl)pcEl.innerHTML=res.error&&!(res.pc&&res.pc.length)?'<span style="color:#e53935;font-size:11px">오류</span>':res.pc&&res.pc.length?'<div class="tags">'+res.pc.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
+      const mobEl=document.getElementById('mob-'+i);
+      if(mobEl)mobEl.innerHTML=res.mobile&&res.mobile.length?'<div class="tags">'+res.mobile.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
     }
   };
-  es.onerror=()=>{es.close();curEs=null;if(btn)btn.disabled=false;if(syncBtn)syncBtn.disabled=false;};
+  es.onerror=()=>{
+    es.close();delete checkState[id];
+    if(activeId===id){['btn-check','btn-idx','btn-exp','btn-sync'].forEach(bid=>{const b=document.getElementById(bid);if(b)b.disabled=false;});}
+    renderSidebar();
+  };
 }
 
 // ── 초기화 ──
