@@ -6,7 +6,7 @@ from flask import Flask, render_template_string, request, jsonify, Response
 from playwright.sync_api import sync_playwright
 import urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
-import threading, queue, uuid, time, json, re, os
+import threading, queue, uuid, time, json, re, os, asyncio
 
 app = Flask(__name__)
 jobs = {}
@@ -272,56 +272,131 @@ def check_visitor_sync(blog_id):
     except Exception as e:
         return {"today": None, "error": str(e)[:100]}
 
-# ── Job ───────────────────────────────────────────────────
+# ── Job (async, 3개 동시 처리) ────────────────────────────
+async def _run_job_async(posts, blog_id, kw_n, mode, q):
+    from playwright.async_api import async_playwright as _ap
+    sem = asyncio.Semaphore(3)
+
+    async with _ap() as p:
+        browser = await p.chromium.launch(headless=True, args=[
+            "--no-sandbox", "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled"])
+
+        async def process_post(i, post):
+            title = post["title"]
+            keyword = "".join(title.split()[:kw_n])
+            pc_secs, mob_secs, indexed, err = [], [], None, None
+            async with sem:
+                if mode in ("exposure", "all"):
+                    encoded = urllib.parse.quote(keyword)
+                    for is_mobile in (False, True):
+                        if is_mobile:
+                            ctx = await browser.new_context(
+                                viewport={"width":390,"height":844},
+                                user_agent="Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+                                is_mobile=True, has_touch=True, locale="ko-KR",
+                                extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9"},
+                            )
+                        else:
+                            ctx = await browser.new_context(
+                                viewport={"width":1920,"height":1080},
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                locale="ko-KR", extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9"},
+                            )
+                        await ctx.add_init_script(STEALTH_JS)
+                        page = await ctx.new_page()
+                        try:
+                            base = "https://m.search.naver.com" if is_mobile else "https://search.naver.com"
+                            await page.goto(f"{base}/search.naver?query={encoded}", wait_until="domcontentloaded", timeout=22000)
+                            try: await page.wait_for_selector("#main_pack,[id^='sp_'],.api_subject_bx", timeout=6000)
+                            except: pass
+                            await asyncio.sleep(0.6)
+                            section_items = await page.evaluate(EXTRACT_JS)
+                            found_secs, seen = [], set()
+                            for raw_type, items in section_items.items():
+                                sname = map_section(raw_type)
+                                if not sname or sname in seen: continue
+                                for item in items:
+                                    href = item.get("href","") if isinstance(item,dict) else ""
+                                    if blog_id_match(href, [blog_id]):
+                                        found_secs.append(sname); seen.add(sname); break
+                            if is_mobile: mob_secs = found_secs
+                            else: pc_secs = found_secs
+                        except Exception as e:
+                            if not err: err = str(e)[:100]
+                        finally:
+                            try: await page.close()
+                            except: pass
+                            try: await ctx.close()
+                            except: pass
+
+                if mode in ("index", "all"):
+                    ctx = await browser.new_context(
+                        viewport={"width":1280,"height":800},
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        locale="ko-KR", extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9"},
+                    )
+                    await ctx.add_init_script(STEALTH_JS)
+                    page = await ctx.new_page()
+                    indexed = False
+                    try:
+                        encoded_t = urllib.parse.quote(f'"{title}"')
+                        url = f"https://search.naver.com/search.naver?where=post&query={encoded_t}&blogger_id={blog_id}"
+                        try: await page.goto(url, wait_until="domcontentloaded", timeout=22000)
+                        except: pass
+                        try: await page.wait_for_selector(".title_link,.api_txt_lines,[class*='title'],.cs_blog", timeout=6000)
+                        except: pass
+                        await asyncio.sleep(0.6)
+                        items = await page.evaluate(BLOG_EXTRACT_JS)
+                        html_content = await page.content()
+                        for item in items:
+                            if blog_id.lower() in item["href"].lower():
+                                nt = normalize(title); ni = normalize(item["text"])
+                                if nt[:20] in ni: indexed = True; break
+                                words = [w for w in nt.split() if len(w) >= 2]
+                                if words and sum(1 for w in words if w in ni) / len(words) >= 0.7:
+                                    indexed = True; break
+                        if not indexed:
+                            nh = normalize(html_content); nt2 = normalize(title)
+                            if blog_id.lower() in nh and nt2[:15] in nh: indexed = True
+                    except: pass
+                    finally:
+                        try: await page.close()
+                        except: pass
+                        try: await ctx.close()
+                        except: pass
+            return i, keyword, pc_secs, mob_secs, indexed, err
+
+        tasks = [asyncio.create_task(process_post(i, post)) for i, post in enumerate(posts)]
+        for coro in asyncio.as_completed(tasks):
+            i, keyword, pc, mobile, indexed, err = await coro
+            post = posts[i]
+            q.put(("result", {
+                "idx": i,
+                "logNo": post.get("logNo",""),
+                "title": post["title"],
+                "link": post.get("link",""),
+                "pubDate": post.get("pubDate",""),
+                "keyword": keyword,
+                "pc": pc,
+                "mobile": mobile,
+                "blog_index": indexed,
+                "error": err,
+                "mode": mode,
+            }))
+        await browser.close()
+
+
 def run_job(job_id, posts, blog_id, kw_n, mode="all"):
     q = jobs[job_id]
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=[
-                "--no-sandbox","--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"])
-            pc_ctx = mobile_ctx = None
-            if mode in ("exposure", "all"):
-                pc_ctx = browser.new_context(
-                    viewport={"width":1920,"height":1080},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    locale="ko-KR", extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
-                )
-                pc_ctx.add_init_script(STEALTH_JS)
-                mobile_ctx = browser.new_context(
-                    viewport={"width":390,"height":844},
-                    user_agent="Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
-                    is_mobile=True, has_touch=True, locale="ko-KR",
-                    extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
-                )
-                mobile_ctx.add_init_script(STEALTH_JS)
-
-            for i, post in enumerate(posts):
-                title = post["title"]
-                keyword = "".join(title.split()[:kw_n])
-                sr = {"pc": [], "mobile": [], "error": None, "keyword": keyword}
-                indexed = None
-                if mode in ("exposure", "all") and pc_ctx and mobile_ctx:
-                    sr = crawl_keyword(keyword, title, pc_ctx, mobile_ctx, [blog_id])
-                if mode in ("index", "all"):
-                    indexed = check_blog_index_sync(blog_id, title, browser)
-                q.put(("result", {
-                    "idx": i,
-                    "logNo": post.get("logNo",""),
-                    "title": title,
-                    "link": post.get("link",""),
-                    "pubDate": post.get("pubDate",""),
-                    "keyword": keyword,
-                    "pc": sr["pc"],
-                    "mobile": sr["mobile"],
-                    "blog_index": indexed,
-                    "error": sr.get("error"),
-                    "mode": mode,
-                }))
-                time.sleep(1.2)
-            browser.close()
+        loop.run_until_complete(_run_job_async(posts, blog_id, kw_n, mode, q))
     except Exception as e:
         q.put(("error", str(e)))
+    finally:
+        loop.close()
     q.put(("done", None))
 
 # ── API Routes (stateless — 계정 데이터는 프론트 localStorage) ──
@@ -518,7 +593,7 @@ tbody tr.checking td{background:#fffdf5}
 </head>
 <body>
 <header class="hd">
-  <div class="hd-brand">🔍 네이버 <em>블로그</em> 대시보드</div>
+  <div class="hd-brand" onclick="goHome()" style="cursor:pointer" title="홈으로">🔍 네이버 <em>블로그</em> 대시보드</div>
   <div class="hd-right">
     <div class="hd-stat">오늘 총 방문자 <strong id="total-v">-</strong></div>
     <button class="btn-hd" id="btn-all-v" onclick="checkAllVisitors()">전체 방문자 확인</button>
@@ -777,21 +852,20 @@ async function startCheck(id,blogId,mode){
     delete p.error;
   });
   lsSave();
+  // API 호출 전에 checkState 세팅 → 스피너 즉시 표시
+  checkState[id]={done:0,total:account.posts.length,mode,es:null};
   if(activeId===id)renderDetail(account);
   renderSidebar();
   const posts=account.posts;
   const r=await apiFetch('/api/check',{method:'POST',body:JSON.stringify({blogId,posts,kwN,mode})});
   if(r.error){
+    delete checkState[id];
     toast('오류: '+r.error);
     if(activeId===id)renderDetail(accounts.find(a=>a.id===id));
     renderSidebar();return;
   }
   const total=r.total;
-  checkState[id]={done:0,total,mode,es:null};
-  if(activeId===id){
-    const pw=document.getElementById('prog-wrap');const pt=document.getElementById('prog-txt');const pb=document.getElementById('prog-bar');
-    if(pw)pw.style.display='block';if(pt){pt.style.display='block';pt.textContent='0 / '+total+' 완료';}if(pb)pb.style.width='0%';
-  }
+  if(checkState[id])checkState[id].total=total;
   renderSidebar();
   const es=new EventSource('/stream/'+r.job_id);
   checkState[id].es=es;
@@ -841,6 +915,11 @@ async function startCheck(id,blogId,mode){
     if(activeId===id){['btn-check','btn-idx','btn-exp','btn-sync'].forEach(bid=>{const b=document.getElementById(bid);if(b)b.disabled=false;});}
     renderSidebar();
   };
+}
+
+function goHome(){
+  activeId=null;renderSidebar();
+  document.getElementById('main-panel').innerHTML='<div class="empty-state"><div class="icon">📋</div><div style="font-size:14px;font-weight:600">왼쪽에서 계정을 선택하세요</div><div style="font-size:12px">계정 추가 → RSS 동기화 → 전체 확인</div></div>';
 }
 
 // ── 초기화 ──
