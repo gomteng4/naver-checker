@@ -754,11 +754,13 @@ function renderDetail(account){
     <div class="prog-wrap" id="prog-wrap" style="${running?'':'display:none'}"><div class="prog-bar" id="prog-bar" style="width:${pct}%"></div></div>
     <div class="prog-txt" id="prog-txt" style="${running?'':'display:none'}">${running?cs.done+' / '+cs.total+' 완료':''}</div>
     <div class="tbl-wrap">
-      ${hasPosts?renderTable(posts,running,cmode):'<div style="padding:24px;text-align:center;color:var(--mu);font-size:13px">RSS 동기화를 눌러 게시물을 불러오세요</div>'}
+      ${hasPosts?renderTable(posts,running,cmode,account.id.slice(0,6)):'<div style="padding:24px;text-align:center;color:var(--mu);font-size:13px">RSS 동기화를 눌러 게시물을 불러오세요</div>'}
     </div>`;
 }
 
-function renderTable(posts,running,mode){
+function renderTable(posts,running,mode,aid){
+  // aid: 계정별 prefix로 element ID 충돌 방지
+  const p_=aid||'x';
   const rows=posts.map((p,i)=>{
     const hasIdx=p.blogIndex!==undefined;
     const hasExp=p.pc!==undefined;
@@ -781,16 +783,16 @@ function renderTable(posts,running,mode){
     const kwText=p.keyword?'키워드: '+p.keyword:'키워드: —';
     const pendingIdx=running&&!hasIdx&&mode!=='exposure';
     const pendingExp=running&&!hasExp&&mode!=='index';
-    return `<tr id="row-${i}"${pendingIdx||pendingExp?' class="checking"':''}>
+    return `<tr id="row-${p_}-${i}"${pendingIdx||pendingExp?' class="checking"':''}>
       <td style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
       <td class="post-title" style="max-width:280px">
         ${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`:esc(p.title)}
-        <div class="post-kw" id="kw-${i}">${esc(kwText)}</div>
+        <div class="post-kw" id="kw-${p_}-${i}">${esc(kwText)}</div>
       </td>
       <td class="post-date">${fmtDate(p.pubDate)}</td>
-      <td id="idx-${i}">${idxHtml}</td>
-      <td id="pc-${i}">${pcHtml}</td>
-      <td id="mob-${i}">${mobHtml}</td>
+      <td id="idx-${p_}-${i}">${idxHtml}</td>
+      <td id="pc-${p_}-${i}">${pcHtml}</td>
+      <td id="mob-${p_}-${i}">${mobHtml}</td>
     </tr>`;
   }).join('');
   return `<table><thead><tr>
@@ -845,11 +847,9 @@ async function startCheck(id,blogId,mode){
   if(checkState[id]){checkState[id].es.close();delete checkState[id];}
   const account=accounts.find(a=>a.id===id);
   if(!account||!account.posts.length){toast('RSS 동기화 먼저 해주세요');return;}
-  // 관련 필드만 초기화
+  // 새 확인 시작 시 이전 결과 전체 초기화 (계정간 겹침 방지)
   account.posts.forEach(p=>{
-    if(mode!=='exposure'){delete p.blogIndex;}
-    if(mode!=='index'){delete p.pc;delete p.mobile;delete p.keyword;}
-    delete p.error;
+    delete p.blogIndex;delete p.pc;delete p.mobile;delete p.keyword;delete p.error;
   });
   lsSave();
   // API 호출 전에 checkState 세팅 → 스피너 즉시 표시
@@ -897,16 +897,18 @@ async function startCheck(id,blogId,mode){
     const pct=total?Math.round(doneN/total*100):0;
     const pb=document.getElementById('prog-bar');if(pb)pb.style.width=pct+'%';
     const pt=document.getElementById('prog-txt');if(pt)pt.textContent=doneN+' / '+total+' 완료';
-    const row=document.getElementById('row-'+i);if(row)row.className='';
-    if(mode!=='index'){const kwEl=document.getElementById('kw-'+i);if(kwEl)kwEl.textContent='키워드: '+(res.keyword||'');}
+    // 계정별 prefix로 올바른 DOM 요소만 접근
+    const p_=id.slice(0,6);
+    const row=document.getElementById('row-'+p_+'-'+i);if(row)row.className='';
+    if(mode!=='index'){const kwEl=document.getElementById('kw-'+p_+'-'+i);if(kwEl)kwEl.textContent='키워드: '+(res.keyword||'');}
     if(mode!=='exposure'){
-      const idxEl=document.getElementById('idx-'+i);
+      const idxEl=document.getElementById('idx-'+p_+'-'+i);
       if(idxEl)idxEl.innerHTML=res.blog_index===true?'<span class="idx-y">✓ 색인됨</span>':res.blog_index===false?'<span class="idx-n">✗ 미색인</span>':'<span class="tag-dim">—</span>';
     }
     if(mode!=='index'){
-      const pcEl=document.getElementById('pc-'+i);
+      const pcEl=document.getElementById('pc-'+p_+'-'+i);
       if(pcEl)pcEl.innerHTML=res.error&&!(res.pc&&res.pc.length)?'<span style="color:#e53935;font-size:11px">오류</span>':res.pc&&res.pc.length?'<div class="tags">'+res.pc.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
-      const mobEl=document.getElementById('mob-'+i);
+      const mobEl=document.getElementById('mob-'+p_+'-'+i);
       if(mobEl)mobEl.innerHTML=res.mobile&&res.mobile.length?'<div class="tags">'+res.mobile.map(mkTag).join('')+'</div>':'<span class="tag-no">✗ 미노출</span>';
     }
   };
