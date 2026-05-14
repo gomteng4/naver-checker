@@ -605,7 +605,18 @@ function mkTag(s){
 }
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500)}
-function fmtDate(s){if(!s)return'';const m=s.match(/(\d{4})[^\d](\d{1,2})[^\d](\d{1,2})/);return m?`${m[1]}.${m[2].padStart(2,'0')}.${m[3].padStart(2,'0')}`:s.slice(0,10)}
+function fmtDate(s){
+  if(!s)return'';
+  // ISO: 2026-05-14
+  let m=s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if(m)return`${m[1]}.${m[2]}.${m[3]}`;
+  // RFC 822: Wed, 14 May 2026 10:30:00 +0900
+  const MO={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+  m=s.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
+  if(m)return`${m[3]}.${MO[m[2]]||'??'}.${m[1].padStart(2,'0')}`;
+  try{const d=new Date(s);if(!isNaN(d))return`${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')}`;}catch(e){}
+  return s.slice(0,10);
+}
 
 function updateTotalV(){
   const total=[...vCache.values()].reduce((s,v)=>s+v,0);
