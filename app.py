@@ -11,21 +11,7 @@ import threading, queue, uuid, time, json, re, os
 app = Flask(__name__)
 jobs = {}
 
-# ── 저장 경로 ─────────────────────────────────────────────
-DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
-os.makedirs(DATA_DIR, exist_ok=True)
-ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
-
-def load_accounts():
-    try:
-        with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_accounts(accounts):
-    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(accounts, f, ensure_ascii=False, indent=2)
+# 계정 데이터는 브라우저 localStorage에 저장 — 서버는 stateless
 
 # ── RSS 파싱 ──────────────────────────────────────────────
 def fetch_rss_posts(blog_id, limit=30):
@@ -331,67 +317,36 @@ def run_job(job_id, posts, blog_id, kw_n):
         q.put(("error", str(e)))
     q.put(("done", None))
 
-# ── API Routes ────────────────────────────────────────────
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    return jsonify(load_accounts())
-
-@app.route("/api/accounts", methods=["POST"])
-def add_account():
+# ── API Routes (stateless — 계정 데이터는 프론트 localStorage) ──
+@app.route("/api/sync", methods=["POST"])
+def sync_posts():
     data = request.json or {}
     blog_id = (data.get("blogId") or "").strip().lower()
-    display_name = (data.get("displayName") or "").strip()
+    limit = max(1, min(100, int(data.get("limit", 30))))
     if not blog_id: return jsonify({"error":"blogId 필요"}), 400
-    accounts = load_accounts()
-    if any(a["blogId"] == blog_id for a in accounts):
-        return jsonify({"error":"이미 등록된 아이디"}), 409
-    account = {"id": str(uuid.uuid4()), "blogId": blog_id,
-               "displayName": display_name or blog_id, "posts": [], "lastSync": None}
-    accounts.append(account)
-    save_accounts(accounts)
-    return jsonify(account), 201
-
-@app.route("/api/accounts/<account_id>", methods=["DELETE"])
-def delete_account(account_id):
-    accounts = [a for a in load_accounts() if a["id"] != account_id]
-    save_accounts(accounts)
-    return jsonify({"ok": True})
-
-@app.route("/api/accounts/<account_id>/sync", methods=["POST"])
-def sync_account(account_id):
-    data = request.json or {}
-    limit = int(data.get("limit", 30))
-    accounts = load_accounts()
-    account = next((a for a in accounts if a["id"] == account_id), None)
-    if not account: return jsonify({"error":"계정 없음"}), 404
-    posts = fetch_rss_posts(account["blogId"], limit)
+    posts = fetch_rss_posts(blog_id, limit)
     if isinstance(posts, dict) and "error" in posts:
         return jsonify({"error": posts["error"]}), 500
-    account["posts"] = posts
-    account["lastSync"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    save_accounts(accounts)
     return jsonify({"ok": True, "count": len(posts), "posts": posts})
 
-@app.route("/api/accounts/<account_id>/visitor", methods=["POST"])
-def visitor_check(account_id):
-    accounts = load_accounts()
-    account = next((a for a in accounts if a["id"] == account_id), None)
-    if not account: return jsonify({"error":"계정 없음"}), 404
-    result = check_visitor_sync(account["blogId"])
-    return jsonify(result)
-
-@app.route("/api/accounts/<account_id>/check", methods=["POST"])
-def start_check(account_id):
+@app.route("/api/visitor", methods=["POST"])
+def visitor_check():
     data = request.json or {}
+    blog_id = (data.get("blogId") or "").strip().lower()
+    if not blog_id: return jsonify({"error":"blogId 필요"}), 400
+    return jsonify(check_visitor_sync(blog_id))
+
+@app.route("/api/check", methods=["POST"])
+def start_check():
+    data = request.json or {}
+    blog_id = (data.get("blogId") or "").strip().lower()
+    posts = data.get("posts", [])
     kw_n = max(1, min(5, int(data.get("kwN", 2))))
-    accounts = load_accounts()
-    account = next((a for a in accounts if a["id"] == account_id), None)
-    if not account: return jsonify({"error":"계정 없음"}), 404
-    posts = account.get("posts", [])
+    if not blog_id: return jsonify({"error":"blogId 필요"}), 400
     if not posts: return jsonify({"error":"게시물 없음 — RSS 동기화 먼저"}), 400
     job_id = str(uuid.uuid4())
     jobs[job_id] = queue.Queue()
-    threading.Thread(target=run_job, args=(job_id, posts, account["blogId"], kw_n), daemon=True).start()
+    threading.Thread(target=run_job, args=(job_id, posts, blog_id, kw_n), daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(posts)})
 
 @app.route("/stream/<job_id>")
@@ -585,55 +540,47 @@ tbody tr.checking td{background:#fffdf5}
 <div class="toast" id="toast"></div>
 
 <script>
+// ── localStorage 저장 (계정/게시물 모두 브라우저에 보관) ──
+const LS_KEY = 'naver_dash_v2';
 let accounts = [], activeId = null, kwN = 2, curEs = null;
 const vCache = new Map();
 
+function lsLoad(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||'[]'); }catch{ return []; } }
+function lsSave(){ localStorage.setItem(LS_KEY, JSON.stringify(accounts)); }
+
 const TAG_COLORS = {
-  'VIEW':     {bg:'#e8f5e9',tx:'#1b5e20',bd:'#a5d6a7'},
-  '블로그':   {bg:'#e8f5e9',tx:'#2e7d32',bd:'#c8e6c9'},
-  '뉴스':     {bg:'#fff8e1',tx:'#e65100',bd:'#ffe082'},
-  '카페':     {bg:'#fce4ec',tx:'#880e4f',bd:'#f48fb1'},
-  '지식IN':   {bg:'#ede7f6',tx:'#4527a0',bd:'#b39ddb'},
-  '웹사이트': {bg:'#e8eaf6',tx:'#283593',bd:'#9fa8da'},
-  '동영상':   {bg:'#ffebee',tx:'#b71c1c',bd:'#ef9a9a'},
-  '쇼핑':     {bg:'#fff3e0',tx:'#bf360c',bd:'#ffcc80'},
-  '포스트':   {bg:'#e0f7fa',tx:'#006064',bd:'#80deea'},
+  'VIEW':{bg:'#e8f5e9',tx:'#1b5e20',bd:'#a5d6a7'},'블로그':{bg:'#e8f5e9',tx:'#2e7d32',bd:'#c8e6c9'},
+  '뉴스':{bg:'#fff8e1',tx:'#e65100',bd:'#ffe082'},'카페':{bg:'#fce4ec',tx:'#880e4f',bd:'#f48fb1'},
+  '지식IN':{bg:'#ede7f6',tx:'#4527a0',bd:'#b39ddb'},'웹사이트':{bg:'#e8eaf6',tx:'#283593',bd:'#9fa8da'},
+  '동영상':{bg:'#ffebee',tx:'#b71c1c',bd:'#ef9a9a'},'쇼핑':{bg:'#fff3e0',tx:'#bf360c',bd:'#ffcc80'},
+  '포스트':{bg:'#e0f7fa',tx:'#006064',bd:'#80deea'},
 };
-function mkTag(s){
-  const c=TAG_COLORS[s]||{bg:'#f5f5f5',tx:'#555',bd:'#e0e0e0'};
-  return `<span class="tag" style="background:${c.bg};color:${c.tx};border:1px solid ${c.bd}">${esc(s)}</span>`;
-}
+function mkTag(s){const c=TAG_COLORS[s]||{bg:'#f5f5f5',tx:'#555',bd:'#e0e0e0'};return`<span class="tag" style="background:${c.bg};color:${c.tx};border:1px solid ${c.bd}">${esc(s)}</span>`;}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500)}
 function fmtDate(s){
   if(!s)return'';
-  // ISO: 2026-05-14
   let m=s.match(/(\d{4})-(\d{2})-(\d{2})/);
   if(m)return`${m[1]}.${m[2]}.${m[3]}`;
-  // RFC 822: Wed, 14 May 2026 10:30:00 +0900
   const MO={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
   m=s.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
   if(m)return`${m[3]}.${MO[m[2]]||'??'}.${m[1].padStart(2,'0')}`;
   try{const d=new Date(s);if(!isNaN(d))return`${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')}`;}catch(e){}
   return s.slice(0,10);
 }
+function genId(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36);}
 
 function updateTotalV(){
   const total=[...vCache.values()].reduce((s,v)=>s+v,0);
   document.getElementById('total-v').textContent=vCache.size?total.toLocaleString('ko-KR')+'명':'-';
 }
 
-async function api(url,opts={}){
+async function apiFetch(url,opts={}){
   const r=await fetch(url,{headers:{'Content-Type':'application/json'},...opts});
   return r.json();
 }
 
-async function loadAccounts(){
-  accounts=await api('/api/accounts');
-  renderSidebar();
-  if(activeId){const a=accounts.find(x=>x.id===activeId);if(a)renderDetail(a);}
-}
-
+// ── 사이드바 ──
 function renderSidebar(){
   const el=document.getElementById('acct-list');
   if(!accounts.length){el.innerHTML='<div style="padding:14px;font-size:12px;color:var(--mu);text-align:center">등록된 계정이 없습니다</div>';return;}
@@ -648,25 +595,28 @@ function renderSidebar(){
   }).join('');
 }
 
-async function addAccount(){
-  const blogId=document.getElementById('inp-id').value.trim();
+function addAccount(){
+  const blogId=document.getElementById('inp-id').value.trim().toLowerCase();
   const displayName=document.getElementById('inp-name').value.trim();
   if(!blogId){toast('블로그 아이디를 입력하세요');return;}
-  const r=await api('/api/accounts',{method:'POST',body:JSON.stringify({blogId,displayName})});
-  if(r.error){toast('오류: '+r.error);return;}
+  if(accounts.some(a=>a.blogId===blogId)){toast('이미 등록된 아이디입니다');return;}
+  const account={id:genId(),blogId,displayName:displayName||blogId,posts:[],lastSync:null};
+  accounts.push(account);
+  lsSave();
   document.getElementById('inp-id').value='';document.getElementById('inp-name').value='';
-  toast('"'+r.displayName+'" 등록 완료');
-  await loadAccounts();selectAccount(r.id);
+  toast('"'+account.displayName+'" 등록 완료');
+  renderSidebar();selectAccount(account.id);
 }
 
-async function deleteAccount(id,name){
+function deleteAccount(id,name){
   if(!confirm('"'+name+'" 계정을 삭제할까요?'))return;
-  await api('/api/accounts/'+id,{method:'DELETE'});
+  accounts=accounts.filter(a=>a.id!==id);
+  lsSave();
   if(activeId===id){
     activeId=null;
     document.getElementById('main-panel').innerHTML='<div class="empty-state"><div class="icon">📋</div><div style="font-size:14px;font-weight:600">왼쪽에서 계정을 선택하세요</div></div>';
   }
-  toast('계정 삭제됨');await loadAccounts();
+  toast('계정 삭제됨');renderSidebar();
 }
 
 function selectAccount(id){
@@ -674,11 +624,12 @@ function selectAccount(id){
   const a=accounts.find(x=>x.id===id);if(a)renderDetail(a);
 }
 
+// ── 상세 패널 ──
 function renderDetail(account){
   const posts=account.posts||[];
   const v=vCache.get(account.id);
   const vHtml=v!==undefined?`<div class="v-chip">오늘 방문자: ${v.toLocaleString('ko-KR')}명</div>`:`<div class="v-chip dim">방문자 미확인</div>`;
-  const lastSync=account.lastSync?'마지막 동기화: '+account.lastSync.slice(0,16).replace('T',' '):'미동기화';
+  const lastSync=account.lastSync?'동기화: '+account.lastSync.slice(0,16).replace('T',' '):'미동기화';
   document.getElementById('main-panel').innerHTML=`
     <div class="detail-head">
       <div>
@@ -687,7 +638,7 @@ function renderDetail(account){
       </div>
       <div class="detail-actions">
         <div id="v-chip">${vHtml}</div>
-        <button class="btn-sync" id="btn-v" onclick="checkVisitor('${account.id}')">방문자 확인</button>
+        <button class="btn-sync" id="btn-v" onclick="checkVisitor('${account.id}','${account.blogId}')">방문자 확인</button>
         <button class="btn-del" onclick="deleteAccount('${account.id}','${esc(account.displayName)}')">삭제</button>
       </div>
     </div>
@@ -697,10 +648,10 @@ function renderDetail(account){
         ${[1,2,3,4,5].map(n=>`<button onclick="setKwN(${n},this)"${n===kwN?' class="sel"':''}>${n}</button>`).join('')}
       </div>
       <div class="ctrl-sep"></div>
-      <button class="btn-sync" id="btn-sync" onclick="syncPosts('${account.id}')">RSS 동기화</button>
+      <button class="btn-sync" id="btn-sync" onclick="syncPosts('${account.id}','${account.blogId}')">RSS 동기화</button>
       <div class="spacer"></div>
       <span class="sync-meta" id="sync-meta">${lastSync} · ${posts.length}개</span>
-      <button class="btn-check" id="btn-check" onclick="startCheck('${account.id}')"${!posts.length?' disabled':''}>전체 확인</button>
+      <button class="btn-check" id="btn-check" onclick="startCheck('${account.id}','${account.blogId}')"${!posts.length?' disabled':''}>전체 확인</button>
     </div>
     <div class="prog-wrap" id="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
     <div class="prog-txt" id="prog-txt"></div>
@@ -727,25 +678,25 @@ function renderTable(posts){
   </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-function setKwN(n,btn){
-  kwN=n;document.querySelectorAll('#kw-seg button').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');
-}
+function setKwN(n,btn){kwN=n;document.querySelectorAll('#kw-seg button').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');}
 
-async function syncPosts(id){
+async function syncPosts(id,blogId){
   const btn=document.getElementById('btn-sync');
   if(btn){btn.disabled=true;btn.textContent='동기화 중...';}
-  const r=await api('/api/accounts/'+id+'/sync',{method:'POST',body:JSON.stringify({limit:30})});
+  const r=await apiFetch('/api/sync',{method:'POST',body:JSON.stringify({blogId,limit:30})});
   if(r.error){toast('RSS 오류: '+r.error);if(btn){btn.disabled=false;btn.textContent='RSS 동기화';}return;}
+  const a=accounts.find(x=>x.id===id);
+  if(a){a.posts=r.posts;a.lastSync=new Date().toISOString().slice(0,19);lsSave();}
   toast(r.count+'개 게시물 불러옴');
-  await loadAccounts();selectAccount(id);
+  renderDetail(accounts.find(x=>x.id===id));
 }
 
-async function checkVisitor(id){
+async function checkVisitor(id,blogId){
   const btn=document.getElementById('btn-v');
   const chip=document.getElementById('v-chip');
   if(btn)btn.disabled=true;
   if(chip)chip.innerHTML='<div class="v-chip dim"><span class="spin"></span>확인 중...</div>';
-  const r=await api('/api/accounts/'+id+'/visitor',{method:'POST'});
+  const r=await apiFetch('/api/visitor',{method:'POST',body:JSON.stringify({blogId})});
   if(btn)btn.disabled=false;
   if(r.today!==null&&r.today!==undefined){
     vCache.set(id,r.today);updateTotalV();renderSidebar();
@@ -761,14 +712,14 @@ async function checkAllVisitors(){
   btn.disabled=true;
   for(let i=0;i<accounts.length;i++){
     btn.textContent=`확인 중 (${i+1}/${accounts.length})`;
-    const r=await api('/api/accounts/'+accounts[i].id+'/visitor',{method:'POST'});
+    const r=await apiFetch('/api/visitor',{method:'POST',body:JSON.stringify({blogId:accounts[i].blogId})});
     if(r.today!==null&&r.today!==undefined){vCache.set(accounts[i].id,r.today);updateTotalV();renderSidebar();}
   }
   btn.disabled=false;btn.textContent='전체 방문자 확인';
   toast('전체 방문자 확인 완료');
 }
 
-async function startCheck(id){
+async function startCheck(id,blogId){
   if(curEs){curEs.close();curEs=null;}
   const btn=document.getElementById('btn-check');
   const syncBtn=document.getElementById('btn-sync');
@@ -783,19 +734,17 @@ async function startCheck(id){
   const account=accounts.find(a=>a.id===id);
   const posts=account?account.posts||[]:[];
   posts.forEach((p,i)=>{
-    const row=document.getElementById('row-'+i);
-    if(row)row.className='checking';
+    const row=document.getElementById('row-'+i);if(row)row.className='checking';
     const kwEl=document.getElementById('kw-'+i);
     if(kwEl)kwEl.textContent='키워드: '+"".concat(...p.title.split(/\s+/).slice(0,kwN));
     const s='<span class="spin"></span>';
     ['idx-','pc-','mob-'].forEach(pfx=>{const el=document.getElementById(pfx+i);if(el)el.innerHTML=s;});
   });
 
-  const r=await api('/api/accounts/'+id+'/check',{method:'POST',body:JSON.stringify({kwN})});
+  const r=await apiFetch('/api/check',{method:'POST',body:JSON.stringify({blogId,posts,kwN})});
   if(r.error){toast('오류: '+r.error);if(btn)btn.disabled=false;if(syncBtn)syncBtn.disabled=false;return;}
 
-  const total=r.total;
-  let done=0;
+  const total=r.total; let done=0;
   if(progBar)progBar.style.width='0%';
   if(progTxt)progTxt.textContent='0 / '+total+' 완료';
 
@@ -809,15 +758,12 @@ async function startCheck(id){
       return;
     }
     const res=JSON.parse(ev.data);
-    const i=res.idx;
-    done++;
+    const i=res.idx; done++;
     const pct=total?Math.round(done/total*100):0;
     if(progBar)progBar.style.width=pct+'%';
     if(progTxt)progTxt.textContent=done+' / '+total+' 완료';
-
     const row=document.getElementById('row-'+i);if(row)row.className='';
     const kwEl=document.getElementById('kw-'+i);if(kwEl)kwEl.textContent='키워드: '+(res.keyword||'');
-
     const idxEl=document.getElementById('idx-'+i);
     if(idxEl){
       if(res.blog_index===true)idxEl.innerHTML='<span class="idx-y">✓ 색인됨</span>';
@@ -839,7 +785,10 @@ async function startCheck(id){
   es.onerror=()=>{es.close();curEs=null;if(btn)btn.disabled=false;if(syncBtn)syncBtn.disabled=false;};
 }
 
-loadAccounts();
+// ── 초기화 ──
+accounts=lsLoad();
+renderSidebar();
+if(accounts.length){selectAccount(accounts[0].id);}
 </script>
 </body>
 </html>"""
