@@ -831,14 +831,14 @@ function renderTable(posts,running,mode,aid){
     const pendingExp=running&&!hasExp&&mode!=='index';
     return `<tr id="row-${p_}-${i}"${pendingIdx||pendingExp?' class="checking"':''}>
       <td data-label="#" style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
-      <td class="post-title" data-label="?쒕ぉ / ?ㅼ썙??" style="max-width:280px">
+      <td class="post-title" data-label="제목 / 키워드" style="max-width:280px">
         ${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`:esc(p.title)}
         <div class="post-kw" id="kw-${p_}-${i}">${esc(kwText)}</div>
       </td>
-      <td class="post-date" data-label="諛쒗뻾??">${fmtDate(p.pubDate)}</td>
-      <td data-label="釉붾줈洹??됱씤" id="idx-${p_}-${i}">${idxHtml}</td>
-      <td data-label="PC ?몄텧" id="pc-${p_}-${i}">${pcHtml}</td>
-      <td data-label="紐⑤컮???몄텧" id="mob-${p_}-${i}">${mobHtml}</td>
+      <td class="post-date" data-label="발행일">${fmtDate(p.pubDate)}</td>
+      <td data-label="블로그 색인" id="idx-${p_}-${i}">${idxHtml}</td>
+      <td data-label="PC 노출" id="pc-${p_}-${i}">${pcHtml}</td>
+      <td data-label="모바일 노출" id="mob-${p_}-${i}">${mobHtml}</td>
     </tr>`;
   }).join('');
   return `<table><thead><tr>
