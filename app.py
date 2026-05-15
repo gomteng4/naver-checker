@@ -514,7 +514,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans KR',sans-serif;back
 .btn-hd{padding:6px 14px;background:var(--g);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer}
 .btn-hd:hover{background:var(--gd)}
 .btn-hd:disabled{background:#bbb;cursor:not-allowed}
-.layout{display:flex;height:calc(100vh - 56px)}
+.layout{display:flex;min-height:calc(100vh - 56px)}
 /* sidebar */
 .sidebar{width:230px;min-width:230px;background:var(--card);border-right:1px solid var(--bd);overflow-y:auto;display:flex;flex-direction:column}
 .sb-head{padding:14px;border-bottom:1px solid var(--bd)}
@@ -534,7 +534,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans KR',sans-serif;back
 .acct-v{font-size:11px;font-weight:700;color:var(--g);margin-top:2px}
 .acct-v.none{color:var(--mu);font-weight:400}
 /* main */
-.main{flex:1;overflow-y:auto;padding:20px 24px}
+.main{flex:1;overflow-y:auto;padding:20px 24px;min-width:0}
 .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--mu);gap:8px;text-align:center}
 .empty-state .icon{font-size:40px}
 .detail-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;gap:10px}
@@ -564,8 +564,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans KR',sans-serif;back
 .prog-bar{height:100%;background:var(--g);border-radius:2px;transition:width .3s;width:0}
 .prog-txt{font-size:11px;color:var(--mu);margin-bottom:10px;display:none}
 /* table */
-.tbl-wrap{background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:hidden}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.tbl-wrap{background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;min-width:760px;border-collapse:collapse;font-size:12.5px}
 thead th{background:#fafafa;padding:9px 12px;text-align:left;font-size:10.5px;font-weight:700;color:var(--mu);border-bottom:1.5px solid var(--bd);white-space:nowrap;letter-spacing:.04em}
 tbody td{padding:9px 12px;border-bottom:1px solid var(--bd);vertical-align:middle}
 tbody tr:last-child td{border-bottom:none}
@@ -589,6 +589,52 @@ tbody tr.checking td{background:#fffdf5}
 /* toast */
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(10px);background:#222;color:#fff;padding:8px 18px;border-radius:14px;font-size:12.5px;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:999}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media (max-width: 900px){
+  .hd{height:auto;min-height:56px;padding:12px 16px;align-items:flex-start;gap:10px;flex-wrap:wrap}
+  .hd-right{width:100%;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .layout{display:block;min-height:auto}
+  .sidebar{width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--bd)}
+  .acct-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;padding:10px}
+  .acct-item{margin-bottom:0}
+  .main{padding:16px}
+  .detail-head{flex-direction:column}
+  .detail-actions{width:100%}
+  .ctrl{padding:12px;gap:8px}
+  .ctrl-sep{display:none}
+  .spacer{display:none}
+  .sync-meta{width:100%;white-space:normal}
+  .toast{width:min(calc(100vw - 32px),420px);text-align:center}
+}
+@media (max-width: 640px){
+  .hd-brand{font-size:15px}
+  .hd-stat{font-size:12px}
+  .hd-stat strong{font-size:14px}
+  .btn-hd,.btn-sync,.btn-check,.btn-add{width:100%;justify-content:center}
+  .add-form input{font-size:16px}
+  .detail-name{font-size:18px}
+  .detail-bid{font-size:12px}
+  .detail-actions{flex-direction:column;align-items:stretch}
+  .ctrl{flex-direction:column;align-items:stretch}
+  .ctrl-label{white-space:normal}
+  .kw-seg{width:100%}
+  .kw-seg button{flex:1}
+  .tbl-wrap{margin:0;border-radius:8px;overflow:hidden}
+  table{min-width:0;font-size:12px}
+  thead{display:none}
+  tbody{display:block}
+  tbody tr{display:block;padding:10px 0}
+  tbody td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 12px;border-bottom:none;text-align:right}
+  tbody td::before{content:attr(data-label);font-size:11px;font-weight:700;color:var(--mu);text-align:left;white-space:nowrap}
+  tbody td:first-child{padding-top:2px}
+  tbody td:last-child{padding-bottom:2px}
+  tbody tr+tr{border-top:1px solid var(--bd)}
+  tbody tr:hover td{background:transparent}
+  .post-title{max-width:none!important;text-align:left}
+  .post-title::before{display:block;margin-bottom:4px}
+  .post-title a{display:block}
+  .post-date{white-space:normal}
+  .tags{justify-content:flex-end}
+}
 </style>
 </head>
 <body>
@@ -784,15 +830,15 @@ function renderTable(posts,running,mode,aid){
     const pendingIdx=running&&!hasIdx&&mode!=='exposure';
     const pendingExp=running&&!hasExp&&mode!=='index';
     return `<tr id="row-${p_}-${i}"${pendingIdx||pendingExp?' class="checking"':''}>
-      <td style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
-      <td class="post-title" style="max-width:280px">
+      <td data-label="#" style="color:var(--mu);font-size:11px;width:26px;text-align:center">${i+1}</td>
+      <td class="post-title" data-label="?쒕ぉ / ?ㅼ썙??" style="max-width:280px">
         ${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noopener">${esc(p.title)}</a>`:esc(p.title)}
         <div class="post-kw" id="kw-${p_}-${i}">${esc(kwText)}</div>
       </td>
-      <td class="post-date">${fmtDate(p.pubDate)}</td>
-      <td id="idx-${p_}-${i}">${idxHtml}</td>
-      <td id="pc-${p_}-${i}">${pcHtml}</td>
-      <td id="mob-${p_}-${i}">${mobHtml}</td>
+      <td class="post-date" data-label="諛쒗뻾??">${fmtDate(p.pubDate)}</td>
+      <td data-label="釉붾줈洹??됱씤" id="idx-${p_}-${i}">${idxHtml}</td>
+      <td data-label="PC ?몄텧" id="pc-${p_}-${i}">${pcHtml}</td>
+      <td data-label="紐⑤컮???몄텧" id="mob-${p_}-${i}">${mobHtml}</td>
     </tr>`;
   }).join('');
   return `<table><thead><tr>
