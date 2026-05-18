@@ -694,8 +694,7 @@ tbody tr.checking td{background:#fffdf5}
     <input id="ck-input" type="text" placeholder="라이선스 키 (예: XXXX-XXXX)" style="width:100%;padding:10px 14px;border:1.5px solid #dde1e7;border-radius:8px;font-size:14px;font-family:inherit;outline:none;margin-bottom:10px" onkeydown="if(event.key==='Enter')ckSubmit()">
     <div id="ck-err" style="font-size:12px;color:#c62828;margin-bottom:10px;display:none"></div>
     <div style="display:flex;gap:8px">
-      <button onclick="ckCancel()" style="flex:1;padding:10px;border:1.5px solid #dde1e7;background:#fff;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">취소</button>
-      <button onclick="ckSubmit()" style="flex:2;padding:10px;background:#03C75A;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">확인</button>
+      <button onclick="ckSubmit()" style="flex:1;padding:10px;background:#03C75A;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">확인</button>
     </div>
   </div>
 </div>
@@ -891,7 +890,7 @@ async function syncPosts(id,blogId){
 }
 
 async function checkVisitor(id,blogId){
-  if(!(await ensureCheckerValid()))return;
+  if(!(await serverCheckCode()))return;
   const btn=document.getElementById('btn-v');
   const chip=document.getElementById('v-chip');
   if(btn)btn.disabled=true;
@@ -908,7 +907,7 @@ async function checkVisitor(id,blogId){
 }
 
 async function checkAllVisitors(){
-  if(!(await ensureCheckerValid()))return;
+  if(!(await serverCheckCode()))return;
   const btn=document.getElementById('btn-all-v');
   btn.disabled=true;
   for(let i=0;i<accounts.length;i++){
@@ -921,7 +920,7 @@ async function checkAllVisitors(){
 }
 
 async function startCheck(id,blogId,mode){
-  if(!(await ensureCheckerValid()))return;
+  if(!(await serverCheckCode()))return;
   mode=mode||'all';
   if(checkState[id]){checkState[id].es.close();delete checkState[id];}
   const account=accounts.find(a=>a.id===id);
@@ -1003,17 +1002,12 @@ function goHome(){
   document.getElementById('main-panel').innerHTML='<div class="empty-state"><div class="icon">📋</div><div style="font-size:14px;font-weight:600">왼쪽에서 계정을 선택하세요</div><div style="font-size:12px">계정 추가 → RSS 동기화 → 전체 확인</div></div>';
 }
 
-// ── 접근 코드 인증 ──
+// ── 라이선스 키 인증 ──
 const _CK_KEY = 'checker_session';
-const _CK_TTL = 86400000;
 let _ckResolve = null;
 function _ckLoad(){ try{ return JSON.parse(localStorage.getItem(_CK_KEY)||'{}'); }catch{ return {}; } }
-function _ckSave(c){ localStorage.setItem(_CK_KEY, JSON.stringify({code:c,ts:Date.now()})); }
-function _ckValid(){ const s=_ckLoad(); return !!(s.code&&(Date.now()-s.ts)<_CK_TTL); }
-function ckCancel(){
-  document.getElementById('ck-overlay').style.display='none';
-  if(_ckResolve){_ckResolve(false);_ckResolve=null;}
-}
+function _ckSave(c){ localStorage.setItem(_CK_KEY, JSON.stringify({code:c})); }
+function _ckValid(){ return !!_ckLoad().code; }
 async function ckSubmit(){
   const key=document.getElementById('ck-input').value.trim();
   const errEl=document.getElementById('ck-err');
@@ -1044,11 +1038,30 @@ function ensureCheckerValid(){
     setTimeout(()=>document.getElementById('ck-input').focus(),50);
   });
 }
+async function serverCheckCode(){
+  const s=_ckLoad();
+  if(!s.code) return ensureCheckerValid();
+  try{
+    const r=await fetch('/api/verify_license',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:s.code})});
+    const data=await r.json();
+    if(data.valid) return true;
+    localStorage.removeItem(_CK_KEY);
+    return ensureCheckerValid();
+  }catch(e){
+    return !!s.code;
+  }
+}
 
 // ── 초기화 ──
 accounts=lsLoad();
 renderSidebar();
 if(accounts.length){selectAccount(accounts[0].id);}
+if(!_ckLoad().code){
+  document.getElementById('ck-input').value='';
+  document.getElementById('ck-err').style.display='none';
+  document.getElementById('ck-overlay').style.display='flex';
+  setTimeout(()=>document.getElementById('ck-input').focus(),50);
+}
 </script>
 </body>
 </html>"""
