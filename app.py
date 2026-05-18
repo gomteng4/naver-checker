@@ -490,15 +490,15 @@ def debug():
         out["error"] = str(e)
     return jsonify(out)
 
-_CHECKER_VALIDATE_URL = "https://naver-blog-production.up.railway.app/checker/validate"
+_CHECKER_LICENSE_CHECK_URL = "https://naver-blog-production.up.railway.app/checker/license-check"
 
-@app.route("/api/verify_code", methods=["POST"])
-def verify_code():
-    code = (request.json or {}).get("code", "").strip()
-    if not code:
+@app.route("/api/verify_license", methods=["POST"])
+def verify_license():
+    key = (request.json or {}).get("key", "").strip()
+    if not key:
         return jsonify({"valid": False}), 400
     try:
-        url = f"{_CHECKER_VALIDATE_URL}?code={urllib.parse.quote(code)}"
+        url = f"{_CHECKER_LICENSE_CHECK_URL}?key={urllib.parse.quote(key)}"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
@@ -689,9 +689,9 @@ tbody tr.checking td{background:#fffdf5}
 
 <div id="ck-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.45);z-index:2000;align-items:center;justify-content:center">
   <div style="background:#fff;border-radius:14px;padding:28px 28px 22px;width:min(360px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.2)">
-    <div style="font-size:16px;font-weight:800;margin-bottom:6px">접근 코드 입력</div>
-    <div style="font-size:13px;color:#888;margin-bottom:18px">기능을 사용하려면 접근 코드가 필요합니다.</div>
-    <input id="ck-input" type="text" placeholder="접근 코드 입력" style="width:100%;padding:10px 14px;border:1.5px solid #dde1e7;border-radius:8px;font-size:14px;font-family:inherit;outline:none;margin-bottom:10px" onkeydown="if(event.key==='Enter')ckSubmit()">
+    <div style="font-size:16px;font-weight:800;margin-bottom:6px">라이선스 키 입력</div>
+    <div style="font-size:13px;color:#888;margin-bottom:18px">기능을 사용하려면 라이선스 키가 필요합니다.</div>
+    <input id="ck-input" type="text" placeholder="라이선스 키 (예: XXXX-XXXX)" style="width:100%;padding:10px 14px;border:1.5px solid #dde1e7;border-radius:8px;font-size:14px;font-family:inherit;outline:none;margin-bottom:10px" onkeydown="if(event.key==='Enter')ckSubmit()">
     <div id="ck-err" style="font-size:12px;color:#c62828;margin-bottom:10px;display:none"></div>
     <div style="display:flex;gap:8px">
       <button onclick="ckCancel()" style="flex:1;padding:10px;border:1.5px solid #dde1e7;background:#fff;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">취소</button>
@@ -1015,20 +1015,20 @@ function ckCancel(){
   if(_ckResolve){_ckResolve(false);_ckResolve=null;}
 }
 async function ckSubmit(){
-  const code=document.getElementById('ck-input').value.trim();
+  const key=document.getElementById('ck-input').value.trim();
   const errEl=document.getElementById('ck-err');
   errEl.style.display='none';
-  if(!code){errEl.textContent='코드를 입력하세요.';errEl.style.display='block';return;}
+  if(!key){errEl.textContent='라이선스 키를 입력하세요.';errEl.style.display='block';return;}
   try{
-    const r=await fetch('/api/verify_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+    const r=await fetch('/api/verify_license',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});
     const data=await r.json();
     if(data.valid){
-      _ckSave(code);
+      _ckSave(key);
       document.getElementById('ck-overlay').style.display='none';
       document.getElementById('ck-input').value='';
       if(_ckResolve){_ckResolve(true);_ckResolve=null;}
     }else{
-      errEl.textContent='유효하지 않은 코드입니다.';errEl.style.display='block';
+      errEl.textContent='유효하지 않은 라이선스 키입니다.';errEl.style.display='block';
     }
   }catch(e){
     errEl.textContent='서버 연결 오류: '+e.message;errEl.style.display='block';
